@@ -3,11 +3,10 @@ import java.io.File
 import au.com.bytecode.opencsv.CSVParser
 import org.apache.hadoop.conf.Configuration
 import org.apache.hadoop.fs._
-import org.apache.hadoop.io.IOUtils
 import org.apache.spark.rdd.RDD
 import org.apache.spark.{SparkConf, SparkContext}
 
-object CrimeApp2 {
+object CrimeApp3 {
 
   def merge(srcPath: String, dstPath: String, header: String): Unit =  {
     val hadoopConfig = new Configuration()
@@ -30,24 +29,35 @@ object CrimeApp2 {
     val crimeData = sc.textFile(crimeFile).cache()
     val withoutHeader: RDD[String] = dropHeader(crimeData)
 
-    generateFile("/tmp/primaryTypes.csv", withoutHeader, columns => Array(columns(5), columns(5), "CrimeType"), ":ID,crimeType,:LABEL")
-    generateFile("/tmp/beats.csv", withoutHeader, columns => Array(columns(10), columns(10), "Beat"), ":ID,id,:LABEL")
-    generateFile("/tmp/crimes.csv", withoutHeader, columns => Array(columns(0),columns(0), "Crime", columns(2), columns(6)), ":ID,id,:LABEL,date,description")
-    generateFile("/tmp/crimesPrimaryTypes.csv", withoutHeader, columns => Array(columns(0),columns(5), "CRIME_TYPE"), ":START_ID,:END_ID,:TYPE")
-    generateFile("/tmp/crimesBeats.csv", withoutHeader, columns => Array(columns(0),columns(10), "ON_BEAT"), ":START_ID,:END_ID,:TYPE")
+    val initialFile = sc.broadcast(withoutHeader)
+
+    val tasks =
+      List(((columns: Array[String]) => Array(columns(5), columns(5), "CrimeType"), ":ID,crimeType,:LABEL", "/tmp/primaryTypes.csv"),
+           ((columns: Array[String]) => Array(columns(10), columns(10), "Beat"), ":ID,id,:LABEL", "/tmp/beats.csv"),
+           ((columns: Array[String]) => Array(columns(0),columns(0), "Crime", columns(2), columns(6)), ":ID,id,:LABEL,date,description", "/tmp/crimes.csv"),
+           ((columns: Array[String]) => Array(columns(0),columns(5), "CRIME_TYPE"), ":START_ID,:END_ID,:TYPE", "/tmp/crimesPrimaryTypes.csv"),
+           ((columns: Array[String]) => Array(columns(0),columns(10), "ON_BEAT"), ":START_ID,:END_ID,:TYPE", "/tmp/crimesBeats.csv")
+      )
+    sc.parallelize(tasks)
+      .map(tuple => transformRDD(initialFile.value, tuple._1, tuple._2, tuple._3))
+      .foreach(item => generateFile(item._1, item._2, item._3))
   }
 
-  def generateFile(file: String, withoutHeader: RDD[String], fn: Array[String] => Array[String], header: String , separator: String = ",") = {
-    FileUtil.fullyDelete(new File(file))
-
-    val tmpFile = "/tmp/" + System.currentTimeMillis() + "-" + file
-    val rows: RDD[String] = withoutHeader.mapPartitions(lines => {
+  def transformRDD(withoutHeader: RDD[String], fn: Array[String] => Array[String], header: String , fileName:String, separator: String = ",") = {
+    (withoutHeader.mapPartitions(lines => {
       val parser = new CSVParser(',')
       lines.map(line => {
         val columns = parser.parseLine(line)
         fn(columns).mkString(separator)
       })
-    }).distinct()
+    }).distinct(), header, fileName)
+  }
+
+  def generateFile(rows: RDD[String], header:String, file:String) = {
+    FileUtil.fullyDelete(new File(file))
+
+    val tmpFile = "/tmp/" + System.currentTimeMillis() + "-" + file
+
     rows.saveAsTextFile(tmpFile)
     merge(tmpFile, file, header)
   }
